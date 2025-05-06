@@ -1,0 +1,161 @@
+name: Android Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [aarch64, armv7neon, armv7, x86_64, x86]
+        include:
+          - arch: aarch64
+            target: aarch64-linux-android
+            android_abi: arm64-v8a
+            clang_target: aarch64-linux-android21-clang
+          - arch: armv7neon
+            target: thumbv7neon-linux-androideabi
+            android_abi: armeabi-v7a
+            clang_target: armv7a-linux-androideabi21-clang
+            neon_flags: "-mfpu=neon"
+            system_lib_dir: "armv7-linux-androideabi"
+          - arch: armv7
+            target: armv7-linux-androideabi
+            android_abi: armeabi-v7a
+            clang_target: armv7a-linux-androideabi21-clang
+            system_lib_dir: "armv7-linux-androideabi"
+          - arch: x86_64
+            target: x86_64-linux-android
+            android_abi: x86_64
+            clang_target: x86_64-linux-android21-clang
+            system_lib_dir: "x86_64-linux-android"
+          - arch: x86
+            target: i686-linux-android
+            android_abi: x86
+            clang_target: i686-linux-android21-clang
+            system_lib_dir: "i686-linux-android"
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install general dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential autoconf automake libtool
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          target: ${{ matrix.target }}
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Set up environment
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+        
+          sudo ln -sf $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }} $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android-clang
+        
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          
+
+          ARCH_UPPER=$(echo "${{ matrix.arch }}" | tr '[:lower:]' '[:upper:]')
+          # Special handling for NEON target
+          if [ "${{ matrix.arch }}" = "armv7neon" ]; then
+            echo "CARGO_TARGET_THUMBV7NEON_LINUX_ANDROIDEABI_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }}" >> $GITHUB_ENV
+            echo "CC_thumbv7neon_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }}" >> $GITHUB_ENV
+            sudo ln -sf $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }} $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/thumbv7neon-linux-androideabi-clang
+          else
+            echo "CARGO_TARGET_${ARCH_UPPER}_LINUX_ANDROID_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }}" >> $GITHUB_ENV
+          fi
+
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            echo "CC_i686_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }}" >> $GITHUB_ENV
+            echo "AR_i686_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> $GITHUB_ENV
+            sudo ln -sf $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }} $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android-clang
+          fi
+
+          if [ "${{ matrix.arch }}" = "armv7" ] || [ "${{ matrix.arch }}" = "armv7neon" ]; then
+            echo "CC_arm_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }}" >> $GITHUB_ENV
+            sudo ln -sf $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }} $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/arm-linux-androideabi-clang
+            sudo ln -sf $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }} $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi-clang
+          fi
+
+          # Create .cargo/config.toml with appropriate settings for each architecture
+          mkdir -p .cargo
+          if [ "${{ matrix.arch }}" = "armv7neon" ]; then
+            cat > .cargo/config.toml << EOF
+          [target.${{ matrix.target }}]
+          linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }}"
+          rustflags = [
+            "-C", "target-feature=+neon",
+            "-L", "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }}/21",
+            "-L", "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }}",
+            "-l", "log",
+            "-l", "android",
+          ]
+          EOF
+          else
+            cat > .cargo/config.toml << EOF
+          [target.${{ matrix.target }}]
+          linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.clang_target }}"
+          rustflags = [
+            "-L", "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }}/21",
+            "-L", "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }}",
+            "-l", "log",
+            "-l", "android",
+          ]
+          EOF
+          fi
+
+      - name: Build for Android ${{ matrix.arch }}
+        run: |
+          # Set RUSTFLAGS based on architecture
+          if [ "${{ matrix.arch }}" = "armv7neon" ]; then
+            export RUSTFLAGS="-C link-arg=-fuse-ld=lld -C target-feature=+neon \
+              -L $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }}/21 \
+              -L $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }} \
+              -L ${{ github.workspace }}/lib/android/${{ matrix.lib_dir }}"
+            
+            export CFLAGS_thumbv7neon_linux_androideabi="-O3 -target armv7a-linux-androideabi21 -mfpu=neon"
+          else
+            export RUSTFLAGS="-C link-arg=-fuse-ld=lld \
+              -L $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }}/21 \
+              -L $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.system_lib_dir }} \
+              -L ${{ github.workspace }}/lib/android/${{ matrix.lib_dir }}"
+          fi
+          
+          # Make libraries discoverable to pkg-config and the Rust linker
+          export PKG_CONFIG_PATH="${{ github.workspace }}/lib/android/${{ matrix.lib_dir }}/pkgconfig"
+          export PKG_CONFIG_ALLOW_CROSS=1
+          
+          # Set architecture-specific CFLAGS
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            export CFLAGS_i686_linux_android="-O3 -target i686-linux-android21"
+          fi
+          
+          if [ "${{ matrix.arch }}" = "armv7" ]; then
+            export CFLAGS_arm_linux_androideabi="-O3 -target armv7a-linux-androideabi21"
+          fi
+          
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Verify binary
+        run: |
+          file target/${{ matrix.target }}/release/sush
+          ls -lh target/${{ matrix.target }}/release/sush
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: sush-${{ matrix.android_abi }}${{ matrix.arch == 'armv7neon' && '-neon' || '' }}
+          path: target/${{ matrix.target }}/release/sush
+          if-no-files-found: error
